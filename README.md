@@ -55,6 +55,8 @@ After the SEO crawl is checkpointed in SQLite, Lighthouse runs **once on the hom
 
 Chrome runs in an isolated child process with an overall timeout. `LIGHTHOUSE_TIMEOUT_MS` defaults to `120000` and is clamped between `10000` and `180000` milliseconds. Missing Chrome, timeout, browser crashes and unsuccessful runs produce an unavailable result with an explanation; saved SEO pages and issues remain available. Older audits without Lighthouse data are shown as not previously measured.
 
+Full-page screenshot gathering is disabled because this application uses only Lighthouse scores and metrics. If Chromium crashes, check Railway's **Deploy Logs** for `[Lighthouse] Analysis unavailable` and its resource **Metrics**. The log retains the Lighthouse error code, worker exit status/signal, and memory snapshots. On hosts exposing cgroup v2 counters, an increased `oom_kill` count identifies a memory kill during that run; a tab crash alone does not prove memory exhaustion. The memory peak is the container's peak since startup, not a per-audit measurement. A completed audit's saved result stays unchanged; start a new audit after adjusting resources or deploying a fix. `example.com` is a useful lightweight comparison when only larger homepages fail.
+
 Browser requests pass through a local public-IP-only proxy that checks DNS and pins validated addresses. Lighthouse can load public third-party resources needed by the homepage; local/private resources are refused. The proxy and hosting hardware can affect timings. Chromium uses container-compatible flags in Docker. This is an intentionally small trusted-testing setup, not a multi-tenant browser service.
 
 ## Railway preparation

@@ -7,6 +7,7 @@ import { normalizeUrl } from "@/crawler/url";
 import { resolvePublicAddress } from "@/crawler/security";
 import type { LighthouseResult } from "@/shared/types";
 import { startLighthouseProxy } from "./proxy";
+import { explainLighthouseFailure, lighthouseMemory, type LighthouseMemory } from "./diagnostics";
 
 export function homepageUrl(input: string): string {
   const normalized = normalizeUrl(input);
@@ -28,7 +29,7 @@ export function unavailableLighthouse(input: string, error: string): LighthouseR
 }
 
 interface MinimalLhr {
-  runtimeError?: { message?: string };
+  runtimeError?: { message?: string; code?: string };
   lighthouseVersion?: string;
   finalDisplayedUrl?: string;
   finalUrl?: string;
@@ -109,11 +110,24 @@ export async function analyzeHomepage(input: string): Promise<LighthouseResult> 
   let child: ChildProcess | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let forceTimer: ReturnType<typeof setTimeout> | undefined;
+  let memoryBefore: LighthouseMemory | null = null;
+  let errorCode: string | null = null;
   const terminate = () => { if (child) stopTree(child, "SIGTERM"); };
+  const explainFailure = async (message: string) => {
+    const memoryAfter = await lighthouseMemory();
+    console.warn("[Lighthouse] Analysis unavailable", JSON.stringify({
+      homepage: url, code: errorCode,
+      workerExitCode: child?.exitCode ?? null, workerExitSignal: child?.signalCode ?? null,
+      memoryBefore, memoryAfter,
+    }));
+    return explainLighthouseFailure(message, errorCode, memoryBefore, memoryAfter);
+  };
   try {
     await resolvePublicAddress(url);
     proxy = await startLighthouseProxy();
     profile = await mkdtemp(join(tmpdir(), "seo-lighthouse-"));
+    memoryBefore = await lighthouseMemory();
+    console.info("[Lighthouse] Starting homepage analysis", JSON.stringify({ homepage: url, memory: memoryBefore }));
     const timeout = lighthouseTimeout();
     child = spawn(process.execPath, ["--max-old-space-size=512", resolve(process.cwd(), "scripts/lighthouse-worker.mjs")], {
       stdio: ["ignore", "ignore", "ignore", "ipc"], windowsHide: true, detached: process.platform !== "win32",
@@ -131,24 +145,32 @@ export async function analyzeHomepage(input: string): Promise<LighthouseResult> 
       }, timeout);
       worker.on("message", message => {
         if (!message || typeof message !== "object") return;
-        const value = message as { type?: string; report?: MinimalLhr; error?: string };
+        const value = message as { type?: string; report?: MinimalLhr; error?: string; errorCode?: string };
         if (value.type === "result") report = value.report;
-        if (value.type === "error") failure = typeof value.error === "string" ? value.error : "The browser performance check failed.";
+        if (value.type === "error") {
+          failure = typeof value.error === "string" ? value.error : "The browser performance check failed.";
+          errorCode = typeof value.errorCode === "string" ? value.errorCode.slice(0, 80) : null;
+        }
       });
-      worker.once("error", error => reject(new Error(`Unable to start the Lighthouse worker: ${error.message}`)));
+      worker.once("error", error => {
+        errorCode = (error as NodeJS.ErrnoException).code?.slice(0, 80) ?? null;
+        reject(new Error(`Unable to start the Lighthouse worker: ${error.message}`));
+      });
       worker.once("exit", code => {
         if (failure) reject(new Error(failure));
         else if (code !== 0 || !report) reject(new Error("The Lighthouse browser process exited before producing a report."));
         else resolve(report);
       });
       worker.send({ url, proxyUrl: proxy!.url, profile, chromePath: chromePath() }, error => { if (error) reject(error); });
-    });
+    }).finally(() => { if (timer) clearTimeout(timer); });
     const result = parseLighthouseReport(raw, url);
+    errorCode = raw.runtimeError?.code?.slice(0, 80) ?? null;
+    if (result.status === "unavailable") result.error = await explainFailure(result.error || "The homepage performance check failed.");
     if (proxy.stats.blockedRequests) result.warnings.push("Browser requests to non-public or unsupported destinations were blocked.");
     if (proxy.stats.limitedRequests) result.warnings.push("Some browser resources exceeded the analysis network limits.");
     return result;
   } catch (error) {
-    return unavailableLighthouse(url, error instanceof Error ? error.message : "The homepage performance check failed.");
+    return unavailableLighthouse(url, await explainFailure(error instanceof Error ? error.message : "The homepage performance check failed."));
   } finally {
     if (timer) clearTimeout(timer);
     if (forceTimer) clearTimeout(forceTimer);

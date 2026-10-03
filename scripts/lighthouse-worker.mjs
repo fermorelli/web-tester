@@ -49,6 +49,8 @@ process.on("message", async input => {
     const result = await lighthouse(url.href, {
       port: chrome.port, output: "json", logLevel: "silent", locale: "en-US", formFactor: "mobile",
       onlyCategories: ["performance", "accessibility", "best-practices", "seo"],
+      // The saved result uses scores and metrics; skip the unused full-page image.
+      disableFullPageScreenshot: true,
       maxWaitForLoad: 45_000, maxWaitForFcp: 30_000,
     });
     if (!result?.lhr) throw new Error("Lighthouse returned no homepage report.");
@@ -62,10 +64,12 @@ process.on("message", async input => {
       runWarnings: lhr.runWarnings,
     } };
   } catch (error) {
+    const errorCode = typeof error?.code === "string" ? error.code.slice(0, 80) : null;
     let message = error instanceof Error ? error.message.slice(0, 1000) : "The browser performance check failed.";
     if (error?.code === "EPERM" || error?.code === "EACCES") message = "Chromium could not start because browser execution is not permitted on the server.";
     if (error?.code === "ENOENT") message = "Chromium could not be found. Check the server's CHROME_PATH setting.";
-    output = { type: "error", error: message };
+    // TARGET_CRASHED identifies a renderer failure; it does not establish an OOM kill.
+    output = { type: "error", error: message, errorCode };
   } finally {
     await cleanup();
     await send(output);
