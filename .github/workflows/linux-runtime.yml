@@ -1,0 +1,35 @@
+name: Linux Docker runtime
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deployment-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SMOKE_CONTAINER: site-inspector-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+      SMOKE_VOLUME: site-inspector-smoke-data-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Build the production Debian image
+        run: docker build --tag site-inspector-smoke:ci .
+      - name: Verify Chromium, Lighthouse, and persisted SQLite history
+        run: node scripts/smoke-deployment.mjs site-inspector-smoke:ci
+      - name: Clean CI resources even after cancellation
+        if: always()
+        run: |
+          docker rm --force "$SMOKE_CONTAINER" 2>/dev/null || true
+          docker volume rm "$SMOKE_VOLUME" 2>/dev/null || true
+          docker image rm site-inspector-smoke:ci 2>/dev/null || true

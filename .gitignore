@@ -1,0 +1,38 @@
+# Dependencies and generated output
+node_modules/
+.next/
+out/
+coverage/
+*.tsbuildinfo
+*.log
+
+# Local audit history, exports, screenshots, and backups
+data/
+artifacts/
+backups/
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.db3
+*.db3-*
+
+# Environment values and credentials (only the root example is published)
+.env*
+!/.env.example
+.npmrc
+.netrc
+secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local agent/editor and OS files
+.codex/
+.agents/
+.idea/
+.DS_Store
+Thumbs.db
