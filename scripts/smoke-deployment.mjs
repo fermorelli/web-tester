@@ -17,8 +17,8 @@ const volume = process.env.SMOKE_VOLUME || `site-inspector-smoke-data-${run}`;
 assert.match(container, /^site-inspector-smoke-[a-zA-Z0-9_-]+$/, "Use a fresh CI container name.");
 assert.match(volume, /^site-inspector-smoke-data-[a-zA-Z0-9_-]+$/, "Use a fresh CI volume name.");
 
-const origin = "http://localhost:3000";
-const base = "http://127.0.0.1:3000";
+const origin = "http://127.0.0.1:3000";
+const base = origin;
 const stop = new AbortController();
 let containerMayExist = false;
 let volumeMayExist = false;
@@ -32,13 +32,20 @@ async function exists(kind, name) {
   catch (error) { if (error.code === 1) return false; throw error; }
 }
 async function json(path, options = {}, timeout = 5000) {
-  // Use IPv4 loopback regardless of the host's localhost IPv6 preference. The
-  // explicit Host/Origin still exercise the configured public-origin boundary.
+  // Keep the request URL, native Host header, Origin, and APP_ORIGIN identical.
+  // Node's fetch must not need a Host override to exercise the origin boundary.
   const response = await fetch(`${base}${path}`, {
-    ...options, headers: { host: "localhost:3000", ...options.headers },
+    ...options,
     signal: AbortSignal.any([stop.signal, AbortSignal.timeout(Math.max(1, timeout))]),
   });
-  if (!response.ok) throw new Error(`${path} returned HTTP ${response.status}.`);
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const body = await response.json();
+      if (typeof body.error === "string") detail = ` ${body.error.slice(0, 500)}`;
+    } catch { /* Non-JSON responses still report their HTTP status. */ }
+    throw new Error(`${path} returned HTTP ${response.status}.${detail}`);
+  }
   return response.json();
 }
 async function healthy() {
