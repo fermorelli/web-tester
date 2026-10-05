@@ -2,9 +2,9 @@ import http from "node:http";
 import https from "node:https";
 import { createBrotliDecompress, createGunzip, createInflate } from "node:zlib";
 import type { Readable } from "node:stream";
-import type { RedirectHop } from "@/shared/types";
+import type { CrawlScope, RedirectHop } from "@/shared/types";
 import { resolvePublicAddress, validatePublicUrl, type Resolver } from "./security";
-import { isInternalUrl } from "./url";
+import { inferCrawlScope, isInCrawlScope, isInternalUrl } from "./url";
 
 export const USER_AGENT = "SiteInspectorBot/1.0 (personal technical SEO audit)";
 export interface FetchOptions {
@@ -13,6 +13,8 @@ export interface FetchOptions {
   maxResponseBytes?: number;
   maxRedirects?: number;
   scopeUrl: string;
+  /** Page requests use the audit path; host metadata explicitly uses host scope. */
+  scope?: CrawlScope;
   beforeRequest?: (url: string) => Promise<void> | void;
 }
 export interface FetchResult {
@@ -93,10 +95,12 @@ export async function safeFetch(input: string, options: FetchOptions, resolver?:
   const redirects: RedirectHop[] = [];
   const seen = new Set<string>();
   let target = input;
+  const scope = options.scope ?? inferCrawlScope(options.scopeUrl);
   for (;;) {
     try {
       const url = validatePublicUrl(target);
       if (!isInternalUrl(url.href, options.scopeUrl)) throw new Error("Redirect outside the site domain: not followed.");
+      if (!isInCrawlScope(url.href, scope)) throw new Error("Redirect outside the selected audit scope: not followed.");
       if (seen.has(url.href)) throw new Error("Redirect loop detected.");
       seen.add(url.href);
       await options.beforeRequest?.(url.href);

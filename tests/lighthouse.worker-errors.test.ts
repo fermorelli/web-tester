@@ -68,7 +68,7 @@ describe("Lighthouse worker failure boundary", () => {
     const result = await analyzeHomepage("https://example.com/nested?input_token=private-input-detail");
 
     expect(result).toMatchObject({
-      status: "unavailable", homepageUrl: "https://example.com/", finalUrl: null,
+      status: "unavailable", homepageUrl: "https://example.com/nested", finalUrl: null,
       scores: null, metrics: null, error: expect.stringContaining("Chromium's browser tab crashed"),
     });
     expect(result.error).not.toContain("ran out of memory");
@@ -78,7 +78,7 @@ describe("Lighthouse worker failure boundary", () => {
     const warning = vi.mocked(console.warn).mock.calls.find(call => call[0] === "[Lighthouse] Analysis unavailable");
     expect(warning).toBeDefined();
     expect(JSON.parse(String(warning![1]))).toMatchObject({
-      homepage: "https://example.com/", code: "TARGET_CRASHED", workerExitCode: 0,
+      homepage: "https://example.com/nested", code: "TARGET_CRASHED", workerExitCode: 0,
       memoryBefore: { oomKills: 2 }, memoryAfter: { oomKills: 2 },
     });
     const logged = JSON.stringify([...vi.mocked(console.info).mock.calls, ...vi.mocked(console.warn).mock.calls]);

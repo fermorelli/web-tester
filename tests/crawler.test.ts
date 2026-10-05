@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { crawlSite, type PageFetcher } from "@/crawler/crawl";
 import { RequestFailure, type FetchOptions, type FetchResult } from "@/crawler/http";
+import { isInCrawlScope } from "@/crawler/url";
+import { generateIssues } from "@/issues/generate";
 
 const origin = "https://audit.example.org";
 const root = `${origin}/`;
@@ -18,6 +20,93 @@ function transport(fixtures: Record<string, FetchResult | Error>) {
 const html = (links = "", extra = "") => `<html><head><title>Audit fixture title</title></head><body><h1>Fixture</h1><main>${"Useful words ".repeat(160)}</main>${links}${extra}</body></html>`;
 
 describe("bounded site crawler", () => {
+  it("audits the portfolio project without downloading or reporting its sibling GitHub Pages projects", async () => {
+    const host = "https://fermorelli.github.io";
+    const portfolio = `${host}/new-portfolio/`;
+    const siblings = [`${host}/E-commerce/`, `${host}/traveling-planner/`, `${host}/weather-dashboard/`];
+    const map = `${host}/maps/projects.xml`;
+    const fetcher = transport({
+      [`${host}/robots.txt`]: response(`${host}/robots.txt`, `User-agent: *\nAllow: /\nSitemap: ${map}`),
+      [map]: response(map, `<urlset>${[portfolio, ...siblings].map(url => `<url><loc>${url}</loc></url>`).join("")}</urlset>`),
+      [portfolio]: response(portfolio, html('<a href="/E-commerce">Store</a><a href="/traveling-planner/">Travel</a><a href="/weather-dashboard/">Weather</a><a href="#work">Work</a>')),
+    });
+
+    const result = await crawlSite(portfolio, { fetcher });
+
+    expect(result.pages.map(page => page.url)).toEqual([portfolio]);
+    expect(result.relationships).toEqual([]);
+    expect(result.sitemap.urls).toEqual([portfolio]);
+    expect(result.sitemap.documents).toEqual([map]);
+    expect(result.limits).toMatchObject({ scope: { kind: "path", rootUrl: portfolio }, analysisVersion: 2 });
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([`${host}/robots.txt`, map, `${host}/sitemap.xml`, portfolio]);
+    const metadata = fetcher.mock.calls.filter(([url]) => url !== portfolio);
+    expect(metadata.every(([, options]) => options.scope?.kind === "host")).toBe(true);
+    expect(fetcher.mock.calls.find(([url]) => url === portfolio)?.[1].scope?.kind).toBe("path");
+    const issues = generateIssues({ ...result, startUrl: portfolio, domain: "fermorelli.github.io" });
+    expect(issues.every(issue => issue.affectedUrls.every(url => isInCrawlScope(url, result.limits.scope!)))).toBe(true);
+  });
+
+  it("keeps submitted query state and allows a slash redirect while discovering only project descendants", async () => {
+    const start = `${origin}/project?lang=es`;
+    const final = `${origin}/project/?lang=es`;
+    const child = `${origin}/project/about?lang=es`;
+    const sitemapChild = `${origin}/project/contact`;
+    const fetcher = transport({
+      [`${origin}/sitemap.xml`]: response(`${origin}/sitemap.xml`, `<urlset><url><loc>${sitemapChild}</loc></url><url><loc>${origin}/other-project/</loc></url></urlset>`),
+      [start]: { ...response(final, html('<a href="about?lang=es">About</a><a href="../other-project/">Other project</a><a href="/project-old/">Prefix collision</a>')), redirects: [{ url: start, statusCode: 301, location: final }] },
+      [child]: response(child, html()),
+      [sitemapChild]: response(sitemapChild, html()),
+    });
+
+    const result = await crawlSite(start, { fetcher });
+
+    expect(result.pages.map(page => page.url).sort()).toEqual([start, child, sitemapChild].sort());
+    expect(result.pages[0]).toMatchObject({ finalUrl: final, depth: 0, parsed: expect.any(Object) });
+    expect(result.pages.find(page => page.url === child)?.depth).toBe(1);
+    expect(result.sitemap.urls).toEqual([sitemapChild]);
+    expect(result.limits.scope).toEqual({ kind: "path", rootUrl: `${origin}/project` });
+    expect(fetcher.mock.calls.some(([url]) => url === start)).toBe(true);
+    expect(fetcher.mock.calls.some(([url]) => url.includes("other-project") || url.includes("project-old"))).toBe(false);
+  });
+
+  it("blocks a project redirect before fetching the sibling and retains its observed redirect evidence", async () => {
+    const project = `${origin}/project/`;
+    const redirect = `${origin}/project/escape`;
+    const target = `${origin}/other-project/`;
+    const fixtureFetcher = transport({ [project]: response(project, html('<a href="escape">Escaping redirect</a>')) });
+    const fetcher = vi.fn<PageFetcher>(async (url, options) => {
+      if (url !== redirect) return fixtureFetcher(url, options);
+      try { await options.beforeRequest?.(target); }
+      catch (error) { throw new RequestFailure((error as Error).message, target, [{ url, statusCode: 301, location: target }], 301); }
+      throw new Error("The scope policy did not reject the sibling redirect");
+    });
+
+    const result = await crawlSite(project, { fetcher });
+
+    expect(result.pages.find(page => page.url === redirect)).toMatchObject({
+      finalUrl: target, statusCode: 301, parsed: null, indexable: null,
+      error: expect.stringContaining("selected audit scope"),
+      redirects: [{ url: redirect, statusCode: 301, location: target }],
+    });
+    expect(fetcher.mock.calls.map(([url]) => url)).not.toContain(target);
+    expect(result.relationships).toEqual([{ source: project, target: redirect, text: "Escaping redirect", nofollow: false }]);
+  });
+
+  it("checks only in-scope image sizes in a project audit", async () => {
+    const project = `${origin}/project/`;
+    const localImage = `${origin}/project/image.png`;
+    const siblingImage = `${origin}/other-project/image.png`;
+    const rootImage = `${origin}/shared-image.png`;
+    const fixtureFetcher = transport({ [project]: response(project, html("", `<img src="image.png"><img src="${siblingImage}"><img src="${rootImage}">`)) });
+    const fetcher = vi.fn<PageFetcher>(async (url, options) => options.method === "HEAD"
+      ? response(url, "", 200, { "content-length": "12345" }) : fixtureFetcher(url, options));
+
+    const result = await crawlSite(project, { fetcher });
+
+    expect(fetcher.mock.calls.filter(([, options]) => options.method === "HEAD").map(([url]) => url)).toEqual([localImage]);
+    expect(result.pages[0].parsed?.images.map(image => image.contentLength)).toEqual([12345, null, null]);
+  });
+
   it("normalizes links, stays on domain, skips assets, honors robots, records errors and relationships", async () => {
     const fetcher = transport({
       [`${origin}/robots.txt`]: response(`${origin}/robots.txt`, "User-agent: *\nDisallow: /private"),

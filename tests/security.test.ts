@@ -100,6 +100,53 @@ describe("public URL and DNS validation", () => {
 });
 
 describe("safeFetch connection and redirect boundaries", () => {
+  it.each([
+    "/E-commerce/", "/new-portfolio-old/", "/new-portfolio/../traveling-planner/",
+    "/new-portfolio/%2e%2e/weather-dashboard/", "https://www.example.com/other-project/",
+    "/new-portfolio/%2e%2e%2fE-commerce/", "/new-portfolio/%5c..%5ctraveling-planner/",
+  ])("blocks a same-host project escape before its policy, DNS or connection: %s", async location => {
+    const start = "https://example.com/new-portfolio/";
+    const calls = mockTransport([{ status: 302, headers: { location } }]);
+    const beforeRequest = vi.fn();
+    await expect(safeFetch(start, { scopeUrl: start, beforeRequest }, publicResolver)).rejects.toMatchObject({
+      message: expect.stringContaining("outside the selected audit scope"),
+      url: new URL(location, start).href, statusCode: 302,
+      redirects: [{ url: start, statusCode: 302, location: new URL(location, start).href }],
+    });
+    expect(calls).toHaveLength(1);
+    expect(publicResolver).toHaveBeenCalledTimes(1);
+    expect(beforeRequest).toHaveBeenCalledExactlyOnceWith(start);
+  });
+
+  it("rejects an out-of-scope initial request without resolving or connecting", async () => {
+    const calls = mockTransport([]);
+    await expect(safeFetch("https://example.com/other/", { scopeUrl: "https://example.com/project/" }, publicResolver)).rejects.toThrow(/selected audit scope/);
+    expect(calls).toHaveLength(0);
+    expect(publicResolver).not.toHaveBeenCalled();
+  });
+
+  it("allows slash canonicalization, HTTPS and www within the submitted path without losing query state", async () => {
+    const start = "http://example.com/new-portfolio?lang=es";
+    const final = "https://www.example.com/new-portfolio/?lang=es";
+    const calls = mockTransport([{ status: 301, headers: { location: final } }, { body: "Portfolio HTML" }]);
+    const result = await safeFetch(start, { scopeUrl: start }, publicResolver);
+    expect(result).toMatchObject({ url: final, body: "Portfolio HTML", redirects: [{ url: start, statusCode: 301, location: final }] });
+    expect(calls.map(call => call.url.href)).toEqual([start, final]);
+  });
+
+  it("permits host metadata outside the project while retaining the original host and DNS guards", async () => {
+    const start = "https://example.com/new-portfolio/";
+    const options: Parameters<typeof safeFetch>[1] = { scopeUrl: start, scope: { kind: "host", rootUrl: "https://example.com/" } };
+    const calls = mockTransport([
+      { status: 301, headers: { location: "/maps/main.xml" } }, { body: "<urlset/>" },
+      { status: 302, headers: { location: "https://other.example/robots.txt" } },
+    ]);
+    expect((await safeFetch("https://example.com/sitemap.xml", options, publicResolver)).body).toBe("<urlset/>");
+    await expect(safeFetch("https://example.com/robots.txt", options, publicResolver)).rejects.toThrow(/outside the site domain/);
+    expect(calls).toHaveLength(3);
+    expect(publicResolver).toHaveBeenCalledTimes(3);
+  });
+
   it("pins the validated DNS address without replacing the original TLS hostname", async () => {
     const calls = mockTransport([{ body: "<html>public</html>" }]);
     const resolver = vi.fn(async () => [{ address: "93.184.216.34", family: 4 }]);

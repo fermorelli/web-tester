@@ -1,4 +1,4 @@
-import { isInternalUrl, normalizeUrl } from "../crawler/url";
+import { normalizeUrl } from "../crawler/url";
 import { parseRobots } from "../parsers/robots";
 import { htmlPages, pageLookup, type Analyzer } from "./types";
 function directivesEvidence(parsed: ReturnType<typeof htmlPages>[number]["parsed"]): string {
@@ -13,14 +13,16 @@ export const analyzeIndexability: Analyzer = (context, report) => {
     const parsed = page.parsed;
     if (parsed.noindex) report.add("noindex", page.url, directivesEvidence(parsed));
     if (parsed.nofollow) report.add("nofollow", page.url, directivesEvidence(parsed));
-    if (!parsed.canonicalCount) report.add("canonical_missing", page.url, "No link[rel=canonical] was found.");
-    if (parsed.canonicalInvalid || parsed.canonicalCount > 1) report.add("canonical_invalid", page.url, `${parsed.canonicalCount} tags; href: ${parsed.canonicalRaw ?? "missing"}`);
+    if (!parsed.canonicalCount) report.add("canonical_missing", page.url, "No canonical was found in the received HTML head or HTTP Link header. Google can select a canonical without an explicit declaration.");
+    if (parsed.canonicalInvalid) {
+      const declarations = parsed.canonicalDeclarations?.map(declaration => `${declaration.source}: ${declaration.raw ?? "missing href"} → ${declaration.url ?? "invalid HTTP/HTTPS destination"}`).join(" | ");
+      report.add("canonical_invalid", page.url, `${parsed.canonicalCount} declarations; ${declarations ?? `href: ${parsed.canonicalRaw ?? "missing"}`}`);
+    }
     if (!parsed.canonical) continue;
-    if (parsed.canonical !== normalizeUrl(page.finalUrl)) report.add("canonical_other", page.url, `${page.finalUrl} → canonical ${parsed.canonical}`);
+    if (parsed.canonical !== normalizeUrl(page.finalUrl)) report.add("canonical_other", page.url, `${page.finalUrl} → declared canonical ${parsed.canonical}. Content equivalence and the search engine's selected canonical were not verified.`);
     const target = lookup.get(parsed.canonical);
-    if (!isInternalUrl(parsed.canonical, context.startUrl)) report.add("canonical_suspicious", page.url, `Canonical outside the site domain: ${parsed.canonical}. This may be intentional; review content equivalence.`);
-    if (target && ((target.statusCode !== null && target.statusCode >= 400) || target.parsed?.noindex || target.blockedByRobots || target.error)) {
-      report.add("canonical_suspicious", page.url, `Canonical ${parsed.canonical}: HTTP ${target.statusCode ?? "unverified"}, noindex=${target.parsed?.noindex ?? "unknown"}, robots=${target.blockedByRobots}, error=${target.error ?? "none"}.`);
+    if (target && ((target.statusCode !== null && target.statusCode >= 400) || target.parsed?.noindex)) {
+      report.add("canonical_suspicious", page.url, `Declared canonical ${parsed.canonical}: observed HTTP ${target.statusCode ?? "unverified"}, noindex applicable to Googlebot=${target.parsed?.noindex ?? "unknown"}. This does not confirm Google's selected canonical or current indexing state.`);
     }
   }
 };

@@ -15,6 +15,29 @@ describe("HTML page parsing", () => {
     expect(parsePage('<link rel="canonical" href="">', "https://example.com/")).toMatchObject({ canonical: null, canonicalInvalid: true });
     expect(parsePage('<link rel="canonical" href="javascript:alert(1)">', "https://example.com/")).toMatchObject({ canonical: null, canonicalInvalid: true });
     expect(parsePage('<link rel="canonical" href="/a"><link rel="canonical" href="/b">', "https://example.com/").canonicalCount).toBe(2);
+    expect(parsePage('<link rel="canonical" href="/a"><link rel="canonical" href="/a">', "https://example.com/").canonicalInvalid).toBe(false);
+  });
+  it("accepts HTTP Link canonicals and detects conflicting destinations across sources", () => {
+    const headerOnly = parsePage('<title>Header canonical</title>', 'https://example.com/page', { Link: '<https://example.com/preferred>; rel="canonical"' });
+    expect(headerOnly).toMatchObject({ canonical: 'https://example.com/preferred', canonicalCount: 1, canonicalInvalid: false,
+      canonicalDeclarations: [{ source: 'header', raw: 'https://example.com/preferred', url: 'https://example.com/preferred' }] });
+    const identical = parsePage('<link rel="canonical" href="/same">', 'https://example.com/page', { link: '</same>; rel="alternate canonical"' });
+    expect(identical).toMatchObject({ canonicalCount: 2, canonicalInvalid: false });
+    const conflict = parsePage('<link rel="canonical" href="/one">', 'https://example.com/page', { link: '</two>; rel=canonical' });
+    expect(conflict).toMatchObject({ canonicalCount: 2, canonicalInvalid: true });
+    expect(conflict.canonicalDeclarations?.map(value => value.url)).toEqual(['https://example.com/one', 'https://example.com/two']);
+  });
+  it("parses Link parameters without treating quoted text or a different anchor context as canonical evidence", () => {
+    const page = parsePage('', 'https://example.com/page', {
+      link: '<https://example.com/asset>; title="sample; rel=canonical"; rel=preload, <https://example.com/foreign>; rel=canonical; anchor="/other", <https://example.com/part,a>; title="text, with; punctuation"; rel="canonical"; anchor="/page"',
+    });
+    expect(page).toMatchObject({ canonical: 'https://example.com/part,a', canonicalCount: 1, canonicalInvalid: false });
+    expect(parsePage('', 'https://example.com/page', { link: '</foreign>; rel=canonical; anchor="#section"' }).canonicalCount).toBe(0);
+    expect(parsePage('', 'https://example.com/page', { link: '</ambiguous>; rel=preload; rel=canonical' }).canonicalCount).toBe(0);
+  });
+  it("does not treat canonical elements in the body as accepted HTML canonical declarations", () => {
+    const page = parsePage('<html><head><title>Page</title></head><body><main><link rel="canonical" href="/other"></main></body></html>', 'https://example.com/');
+    expect(page).toMatchObject({ canonical: null, canonicalCount: 0, canonicalInvalid: false });
   });
   it("merges meta and applicable X-Robots-Tag directives, including none", () => {
     const page = parsePage('<meta name="ROBOTS" content="NONE"><meta name="SiteInspectorBot" content="max-snippet:10">', "https://example.com/", { "X-Robots-Tag": "noarchive, unrelatedbot: index, follow, Googlebot: noimageindex" });
@@ -55,14 +78,30 @@ describe("HTML page parsing", () => {
     expect(page.images[0].src).toBe("https://example.com/sub/a.jpg");
     expect(page.images.every(image => image.contentLength === null)).toBe(true);
   });
-  it("detects graph and nested schema types, invalid JSON, and basic inconsistencies", () => {
+  it("inventories graph and nested schema types while reporting actual JSON syntax errors only", () => {
     const page = parsePage(`<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"Organization","@id":"#brand","name":"A"},{"@type":"Organization","@id":"#brand","name":"B"},{"@type":"Article","author":{"@type":"Person","name":"Ana"}}]}</script><script type="application/ld+json">{bad}</script><script type="application/ld+json">{"@type":"Thing","url":"javascript:x"}</script>`, "https://example.com/");
     expect(page.schemaTypes).toEqual(["Organization", "Article", "Person", "Thing"]);
     expect(page.jsonLdCount).toBe(3);
     expect(page.jsonLdErrors).toHaveLength(1);
-    expect(page.schemaWarnings.some(warning => warning.includes("repeated @id"))).toBe(true);
-    expect(page.schemaWarnings.some(warning => warning.includes("missing @context"))).toBe(true);
-    expect(page.schemaWarnings.some(warning => warning.includes("HTTP URL"))).toBe(true);
+    expect(page.schemaWarnings).toEqual([]);
+  });
+  it("does not reject valid JSON-LD constructs with merged identifiers, full IRIs or untyped nodes", () => {
+    const blocks = [
+      { 'http://schema.org/name': 'Ana', 'http://schema.org/url': { '@id': 'https://example.com/' } },
+      { '@context': 'https://schema.org', '@graph': [{ '@id': '#person', '@type': 'Person', name: 'Ana' }, { '@id': '#person', url: { '@id': 'https://example.com/' } }] },
+      { '@context': { identifier: { '@type': '@id' } }, '@type': 'Thing', url: ['https://example.com/a', 'https://example.com/b'] },
+    ];
+    const page = parsePage(blocks.map(value => `<script type="application/ld+json">${JSON.stringify(value)}</script>`).join(''), 'https://example.com/');
+    expect(page.jsonLdCount).toBe(3);
+    expect(page.jsonLdErrors).toEqual([]);
+    expect(page.schemaWarnings).toEqual([]);
+    expect(page.schemaTypes).toEqual(['Person', 'Thing']);
+  });
+  it("inventories deeply nested valid JSON without misclassifying a stack overflow as a syntax error", () => {
+    const nested = '{"item":'.repeat(15000) + '{"@type":"Thing"}' + '}'.repeat(15000);
+    const page = parsePage(`<script type="application/ld+json">${nested}</script>`, 'https://example.com/');
+    expect(page.jsonLdErrors).toEqual([]);
+    expect(page.schemaTypes).toEqual(['Thing']);
   });
   it("extracts social metadata and recognizable tracking from scripts", () => {
     const page = parsePage('<meta property="og:title" content="Share"><meta name="twitter:card" content="summary"><script src="https://www.googletagmanager.com/gtag/js?id=G-123"></script><script>fbq("init", "123");</script><script src="https://www.clarity.ms/tag/abc"></script>', "https://example.com/");

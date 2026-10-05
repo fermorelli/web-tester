@@ -17,6 +17,7 @@ type AuditRow = {
   crawled_pages: number;
   error_pages: number;
   issue_count: number;
+  observation_count: number;
   max_pages: number;
   progress: number;
   message: string;
@@ -28,7 +29,9 @@ type AuditRow = {
   lighthouse_json: string | null;
 };
 
-const SELECT_AUDIT = `SELECT a.*, s.domain FROM audits a JOIN sites s ON s.id = a.site_id`;
+const SELECT_AUDIT = `SELECT a.*, s.domain,
+  (SELECT COUNT(*) FROM issues i WHERE i.audit_id = a.id) - a.issue_count AS observation_count
+  FROM audits a JOIN sites s ON s.id = a.site_id`;
 
 function summary(row: AuditRow): AuditSummary {
   return {
@@ -42,6 +45,8 @@ function summary(row: AuditRow): AuditSummary {
     crawledPages: row.crawled_pages,
     errorPages: row.error_pages,
     issueCount: row.issue_count,
+    observationCount: Math.max(0, row.observation_count),
+    analysisVersion: row.limits_json === null ? 0 : (JSON.parse(row.limits_json).analysisVersion ?? 0),
     maxPages: row.max_pages,
     progress: row.progress,
     message: translateLegacyMessage(row.message),
@@ -165,6 +170,16 @@ export class AuditRepository {
     }
   }
 
+  private auditSummary(row: AuditRow): AuditSummary {
+    const value = summary(row);
+    if ((value.analysisVersion ?? 0) >= 2) return value;
+    // Present legacy categories consistently without changing the saved crawl snapshot.
+    const findings = this.db.prepare("SELECT issue_id FROM issues WHERE audit_id = ?").all(row.id) as { issue_id: string }[];
+    const observationCount = findings.filter(({ issue_id }) => Object.hasOwn(issueCatalog, issue_id)
+      && issueCatalog[issue_id as IssueId].kind === "observation").length;
+    return { ...value, issueCount: findings.length - observationCount, observationCount };
+  }
+
   createAudit(startUrl: string, domain: string, maxPages: number): AuditSummary {
     if (!Number.isInteger(maxPages) || maxPages < 1) throw new Error("The maximum page count must be a positive integer.");
     const id = randomUUID();
@@ -177,17 +192,17 @@ export class AuditRepository {
       `).run(id, domain, startUrl, now, now, maxPages, "Audit queued.");
     });
     const row = this.db.prepare(`${SELECT_AUDIT} WHERE a.id = ?`).get(id) as AuditRow;
-    return summary(row);
+    return this.auditSummary(row);
   }
 
   listAudits(limit = 30): AuditSummary[] {
     const rows = this.db.prepare(`${SELECT_AUDIT} ORDER BY a.started_at DESC, a.rowid DESC LIMIT ?`).all(historyLimit(limit));
-    return (rows as AuditRow[]).map(summary);
+    return (rows as AuditRow[]).map(row => this.auditSummary(row));
   }
 
   listSiteAudits(domain: string, limit = 30): AuditSummary[] {
     const rows = this.db.prepare(`${SELECT_AUDIT} WHERE s.domain = ? ORDER BY a.started_at DESC, a.rowid DESC LIMIT ?`).all(domain, historyLimit(limit));
-    return (rows as AuditRow[]).map(summary);
+    return (rows as AuditRow[]).map(row => this.auditSummary(row));
   }
 
   getAudit(id: string): AuditDetail | null {
@@ -201,7 +216,7 @@ export class AuditRepository {
     const sitemap: AuditDetail["sitemap"] = row.sitemap_json === null ? null : JSON.parse(row.sitemap_json);
     const lighthouse: LighthouseResult | null = row.lighthouse_json === null ? null : JSON.parse(row.lighthouse_json);
     return {
-      ...summary(row),
+      ...this.auditSummary(row),
       lighthouse: lighthouse === null ? null : { ...lighthouse, warnings: lighthouse.warnings.map(translateLegacyMessage), error: lighthouse.error === null ? null : translateLegacyMessage(lighthouse.error) },
       pages: readDetails<PageAnalysis>("pages").map(presentPage),
       issues: readDetails<Issue>("issues").map(presentIssue),
@@ -253,7 +268,7 @@ export class AuditRepository {
     this.db.prepare(`
       UPDATE audits SET updated_at = ?, crawled_pages = ?, error_pages = ?, issue_count = ?,
         robots_json = ?, sitemap_json = ?, limits_json = ?, warnings_json = ? WHERE id = ?
-    `).run(new Date().toISOString(), result.pages.length, result.pages.filter(pageHasError).length, issues.length,
+    `).run(new Date().toISOString(), result.pages.length, result.pages.filter(pageHasError).length, issues.filter(issue => issue.kind !== "observation").length,
       JSON.stringify(result.robots), JSON.stringify(result.sitemap), JSON.stringify(result.limits), JSON.stringify(result.warnings), id);
   }
 

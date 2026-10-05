@@ -54,7 +54,7 @@ describe("English legacy diagnostics overlay", () => {
     expect(parsed.language).toBe('es');
     expect(parsed.h1).toEqual(['Bienvenidos']);
     expect(parsed.contentSample).toContain('Contenido original');
-    expect(parsed.schemaWarnings[0]).toContain('missing @context');
-    expect(issueCatalog.title_missing.name).toBe('Missing title');
+    expect(parsed.schemaWarnings).toEqual([]);
+    expect(issueCatalog.title_missing.name).toBe('Missing title in received HTML');
   });
 });

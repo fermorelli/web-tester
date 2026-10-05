@@ -7,6 +7,7 @@ import { Icon } from "./icons";
 import { Shell } from "./shell";
 import { dateLabel, ErrorNotice, isActive, LoadingState, numberLabel, ProgressCard, StatusBadge } from "./ui";
 import { useAudit } from "./use-audit";
+import { AuditScope } from "./audit-report";
 
 export function AuditOverview({ id }: { id: string }) {
   const { audit, loading, error, reload } = useAudit(id);
@@ -23,6 +24,7 @@ export function AuditOverview({ id }: { id: string }) {
         <div><div className="eyebrow">AUDIT OVERVIEW</div><h1>{audit.domain}</h1><div className="report-meta"><span><Icon name="clock" size={15} /> {dateLabel(audit.startedAt)}</span><span className="meta-divider" /><StatusBadge status={audit.status} /></div></div>
         {!active && <Link href={fullReportUrl} className="button primary">View full SEO report <Icon name="arrow" size={18} /></Link>}
       </div>
+      <AuditScope audit={audit} />
       {active && <ProgressCard audit={audit} />}
       {!active && audit.error && <div className="notice warning-notice"><Icon name="alert" /><p>{audit.error} You can review the SEO data that was saved before the audit stopped.</p></div>}
       <section className="panel lighthouse-panel" aria-labelledby="lighthouse-heading">
@@ -32,9 +34,9 @@ export function AuditOverview({ id }: { id: string }) {
       </section>
       <section className="seo-overview" aria-labelledby="seo-overview-heading">
         <div className="section-heading"><div><h2 id="seo-overview-heading">SEO crawl at a glance</h2><p>{active ? "Your crawl is in progress. Counts will be finalized when the audit finishes." : `A sample of up to ${audit.maxPages} pages, with the evidence behind every finding.`}</p></div></div>
-        <div className="report-stats overview-stats"><OverviewStat label="Pages processed" value={audit.crawledPages} detail="Includes blocked URLs and request errors" /><OverviewStat label="Indexable pages" value={audit.pages.filter((page) => page.indexable === true).length} detail="Based on observed HTML and HTTP signals" /><OverviewStat label="Issue types" value={audit.issueCount} detail={active ? "Waiting for final analysis" : "Grouped findings in the full SEO report"} /><OverviewStat label="Pages with errors" value={audit.errorPages} detail="HTTP or request errors" /></div>
+        <div className="report-stats overview-stats"><OverviewStat label="Pages processed" value={audit.crawledPages} detail="Includes blocked URLs and request errors" /><OverviewStat label="HTML without noindex" value={audit.pages.filter((page) => page.indexable === true).length} detail="2xx HTML without an applicable noindex directive" /><OverviewStat label="SEO issue types" value={audit.issues.filter(issue => issue.kind !== "observation").length} detail={active ? "Waiting for final analysis" : `${audit.issues.filter(issue => issue.kind === "observation").length} separate contextual observations`} /><OverviewStat label="Pages with errors" value={audit.errorPages} detail="HTTP or request errors" /></div>
       </section>
-      {!active && <div className="overview-report-action"><div><h3>Explore the details behind the overview.</h3><p>Review issues, suggested fixes, individual pages, and crawl coverage.</p></div><Link href={fullReportUrl} className="button primary">View full SEO report <Icon name="arrow" size={18} /></Link></div>}
+      {!active && <div className="overview-report-action"><div><h3>Explore the details behind the overview.</h3><p>Review technical issues, contextual observations, source references, and crawl coverage.</p></div><Link href={fullReportUrl} className="button primary">View full SEO report <Icon name="arrow" size={18} /></Link></div>}
     </>}
   </Shell>;
 }

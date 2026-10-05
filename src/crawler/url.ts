@@ -1,3 +1,5 @@
+import type { CrawlScope } from "@/shared/types";
+
 const ignoredParams = /^(utm_.+|fbclid|gclid|dclid|msclkid|yclid|_ga|_gl|mc_cid|mc_eid|ref|referrer|session(?:id)?|phpsessid)$/i;
 const assetExtension = /\.(?:avif|bmp|gif|ico|jpe?g|png|svg|webp|css|js|mjs|map|woff2?|ttf|eot|pdf|zip|gz|rar|7z|mp[34]|mov|avi|webm|wav|ogg|xml|json|txt|csv|docx?|xlsx?|pptx?)(?:$)/i;
 const uselessPath = /\/(?:wp-admin|wp-json|wp-login\.php|admin|login|logout|signin|signup|register|cart|checkout|search|feed|cgi-bin)(?:\/|$)/i;
@@ -30,6 +32,37 @@ export function isInternalUrl(input: string, base: string): boolean {
     return ["http:", "https:"].includes(url.protocol)
       && siteHostname(url.href) === siteHostname(base)
       && url.port === reference.port;
+  } catch { return false; }
+}
+
+/** The submitted website root: keep its path, but exclude query state from the scope. */
+export function auditRootUrl(input: string): string {
+  const normalized = normalizeUrl(input);
+  if (!normalized) throw new Error("The audit URL is invalid.");
+  const root = new URL(normalized);
+  root.search = "";
+  root.hash = "";
+  return root.href;
+}
+
+export function inferCrawlScope(input: string): CrawlScope {
+  const rootUrl = auditRootUrl(input);
+  return { kind: new URL(rootUrl).pathname === "/" ? "host" : "path", rootUrl };
+}
+
+/** A same-host link can belong to another website hosted under a sibling path. */
+export function isInCrawlScope(input: string, scope: CrawlScope): boolean {
+  try {
+    if (!isInternalUrl(input, scope.rootUrl)) return false;
+    const url = new URL(input, scope.rootUrl);
+    if (url.username || url.password) return false;
+    if (scope.kind === "host") return true;
+    if (scope.kind !== "path") return false;
+    // Some HTTP servers decode these into path separators before resolving dot segments.
+    // Reject ambiguous path escapes, including encoded percent layers, rather than rewriting URLs.
+    if (/%(?:25)*(?:2f|5c)/i.test(url.pathname)) return false;
+    const prefix = new URL(scope.rootUrl).pathname.replace(/\/$/, "");
+    return url.pathname === prefix || url.pathname.startsWith(`${prefix}/`);
   } catch { return false; }
 }
 

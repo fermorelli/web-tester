@@ -19,7 +19,7 @@ describe("SEO and homepage Lighthouse lifecycle", () => {
     await executeAudit(audit, { repository: repo, crawl, lighthouse, issues: () => [] });
     expect(crawl).toHaveBeenCalledOnce();
     expect(lighthouse).toHaveBeenCalledExactlyOnceWith(audit.startUrl);
-    expect(repo.finishAudit).toHaveBeenCalledWith(audit.id, result, [], expect.objectContaining({ status: "unavailable", homepageUrl: "https://example.com/" }));
+    expect(repo.finishAudit).toHaveBeenCalledWith(audit.id, result, [], expect.objectContaining({ status: "unavailable", homepageUrl: "https://example.com/nested" }));
     expect(repo.failAudit).not.toHaveBeenCalled();
   });
   it("completes the SEO report even if the isolated Lighthouse module throws", async () => {

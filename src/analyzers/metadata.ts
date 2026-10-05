@@ -5,13 +5,9 @@ export const analyzeMetadata: Analyzer = (context, report) => {
   for (const page of pages) {
     const { title, description, social } = page.parsed;
     if (!title) report.add("title_missing", page.url, "Title missing or empty.");
-    else if (title.length < 15) report.add("title_short", page.url, `${title.length} characters: ${title}`);
-    else if (title.length > 60) report.add("title_long", page.url, `${title.length} characters: ${title}`);
     if (!description) report.add("description_missing", page.url, "Meta description missing or empty.");
-    else if (description.length < 70) report.add("description_short", page.url, `${description.length} characters: ${description}`);
-    else if (description.length > 160) report.add("description_long", page.url, `${description.length} characters: ${description}`);
-    const missing = ["og:title", "og:description", "og:image"].filter(key => !social.openGraph[key]?.trim());
-    if (missing.length) report.add("social_incomplete", page.url, `Missing or empty fields: ${missing.join(", ")}`);
+    const missing = ["og:title", "og:type", "og:image", "og:url"].filter(key => !social.openGraph[key]?.trim());
+    if (missing.length) report.add("social_incomplete", page.url, `Optional sharing metadata: missing or empty Open Graph basic fields ${missing.join(", ")}. This does not establish a Google Search defect.`);
     if (!social.twitter["twitter:card"]?.trim()) report.add("twitter_missing", page.url, "twitter:card missing or empty.");
   }
   const collectDuplicates = (field: "title" | "description", id: IssueId) => {

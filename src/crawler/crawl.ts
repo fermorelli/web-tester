@@ -3,7 +3,7 @@ import { parseRobots } from "@/parsers/robots";
 import { parseSitemap } from "@/parsers/sitemap";
 import type { CrawlLimits, CrawlResult, PageAnalysis, RobotsReport, SitemapReport } from "@/shared/types";
 import { safeFetch, RequestFailure, type FetchOptions, type FetchResult } from "./http";
-import { isCrawlableUrl, isInternalUrl, normalizeUrl } from "./url";
+import { inferCrawlScope, isCrawlableUrl, isInCrawlScope, isInternalUrl, normalizeUrl } from "./url";
 
 export const DEFAULT_LIMITS: CrawlLimits = {
   maxPages: 100, concurrency: 3, timeoutMs: 10000,
@@ -38,13 +38,15 @@ function sampledSitemapUrls(urls: string[]): string[] {
 
 /** Bounded HTML crawler. It retains per-page failures and never renders JavaScript. */
 export async function crawlSite(startUrl: string, options: CrawlOptions = {}): Promise<CrawlResult> {
-  const limits = { ...DEFAULT_LIMITS, maxPages: Math.max(1, Math.min(100, options.maxPages ?? 100)) };
+  const scope = inferCrawlScope(startUrl);
+  const limits: CrawlLimits = { ...DEFAULT_LIMITS, maxPages: Math.max(1, Math.min(100, options.maxPages ?? 100)), scope, analysisVersion: 2 };
   const fetcher = options.fetcher ?? safeFetch;
   const warnings: string[] = [
     "The audit uses HTML received over HTTP. It does not execute JavaScript or measure Core Web Vitals.",
     "Only the initial host and its www alias are requested. External links and their images are not verified.",
     "Tracking parameters are removed; functional parameters are retained. Sampling prioritizes navigation and different sitemap sections.",
   ];
+  if (scope.kind === "path") warnings.push(`The audit is limited to ${scope.rootUrl} and slash-delimited descendants. Other paths on the same host are excluded; robots.txt and sitemap documents are read as host metadata.`);
   const pages: PageAnalysis[] = [];
   const relationships: CrawlResult["relationships"] = [];
   const policies = new Map<string, Promise<{ report: RobotsReport; policy: RobotsPolicy }>>();
@@ -52,6 +54,7 @@ export async function crawlSite(startUrl: string, options: CrawlOptions = {}): P
   const deadline = Date.now() + 10 * 60 * 1000;
   const baseOptions: FetchOptions = {
     scopeUrl: startUrl, timeoutMs: limits.timeoutMs,
+    scope: { kind: "host", rootUrl: new URL("/", scope.rootUrl).href },
     maxResponseBytes: limits.maxResponseBytes, maxRedirects: limits.maxRedirects,
   };
   const progress = (value: number, message: string) => options.onProgress?.(value, message, pages.length);
@@ -100,7 +103,11 @@ export async function crawlSite(startUrl: string, options: CrawlOptions = {}): P
     if (slot > deadline) throw new Error("The crawl-delay exceeds the time available for this audit.");
     if (wait > 0 && !options.fetcher) await new Promise(resolve => setTimeout(resolve, wait));
   };
-  const pageOptions = { ...baseOptions, beforeRequest };
+  const beforePageRequest = async (url: string) => {
+    if (!isInCrawlScope(url, scope)) throw new Error("Redirect outside the selected audit scope: not followed.");
+    await beforeRequest(url);
+  };
+  const pageOptions: FetchOptions = { ...baseOptions, scope, beforeRequest: beforePageRequest };
 
   progress(3, "Checking robots.txt…");
   const primaryRobots = await loadRobots(new URL(startUrl).origin);
@@ -117,7 +124,7 @@ export async function crawlSite(startUrl: string, options: CrawlOptions = {}): P
     seenSitemaps.add(url);
     try {
       await beforeRequest(url);
-      const response = await fetcher(url, { ...pageOptions, beforeRequest: async target => { if (target !== url) await beforeRequest(target); } });
+      const response = await fetcher(url, { ...baseOptions, beforeRequest: async target => { if (target !== url) await beforeRequest(target); } });
       if (response.statusCode === 404 || response.statusCode === 410) continue;
       if (response.statusCode < 200 || response.statusCode >= 300) throw new Error(`HTTP ${response.statusCode} at ${url}`);
       const parsed = parseSitemap(response.body, response.url);
@@ -125,7 +132,7 @@ export async function crawlSite(startUrl: string, options: CrawlOptions = {}): P
       sitemap.documents.push(url);
       for (const entry of parsed.urls) {
         const normalized = normalizeUrl(entry, response.url);
-        if (normalized && isInternalUrl(normalized, startUrl) && sitemapUrls.size < 10000) sitemapUrls.add(normalized);
+        if (normalized && isInCrawlScope(normalized, scope) && sitemapUrls.size < 10000) sitemapUrls.add(normalized);
         else if (sitemapUrls.size >= 10000) sitemap.truncated = true;
       }
       pendingSitemaps.push(...parsed.sitemaps);
@@ -138,7 +145,7 @@ export async function crawlSite(startUrl: string, options: CrawlOptions = {}): P
   if (sitemap.error) warnings.push(`Sitemap incomplete or inaccessible: ${sitemap.error}`);
 
   const navigation: Candidate[] = [{ url: startUrl, depth: 0, from: [] }];
-  const sitemapQueue: Candidate[] = sampledSitemapUrls(sitemap.urls.filter(url => isCrawlableUrl(url))).map(url => ({ url, depth: null, from: [] }));
+  const sitemapQueue: Candidate[] = sampledSitemapUrls(sitemap.urls.filter(url => isInCrawlScope(url, scope) && isCrawlableUrl(url))).map(url => ({ url, depth: null, from: [] }));
   const candidates = new Map<string, Candidate>([[startUrl, navigation[0]]]);
   const scheduled = new Set<string>();
   const finalFetched = new Set<string>();
@@ -148,6 +155,7 @@ export async function crawlSite(startUrl: string, options: CrawlOptions = {}): P
     while (navigation.length || sitemapQueue.length) {
       const preferSitemap = sequence > 0 && sequence % 4 === 0;
       const candidate = (preferSitemap && sitemapQueue.length ? sitemapQueue : navigation.length ? navigation : sitemapQueue).shift()!;
+      if (!isInCrawlScope(candidate.url, scope)) continue;
       if (scheduled.has(candidate.url) || finalFetched.has(candidate.url)) continue;
       scheduled.add(candidate.url); sequence++;
       return candidates.get(candidate.url) ?? candidate;
@@ -174,10 +182,11 @@ export async function crawlSite(startUrl: string, options: CrawlOptions = {}): P
       const begin = Date.now();
       try {
         // Run here as well as on redirects (the injected test transport is intentionally minimal).
-        await beforeRequest(candidate.url);
+        await beforePageRequest(candidate.url);
         const result = await fetcher(candidate.url, { ...pageOptions, beforeRequest: async url => {
-          if (url !== candidate.url) await beforeRequest(url);
+          if (url !== candidate.url) await beforePageRequest(url);
         } });
+        if (!isInCrawlScope(result.url, scope)) throw new RequestFailure("Redirect outside the selected audit scope: not followed.", result.url, result.redirects, result.statusCode);
         page.finalUrl = result.url; page.statusCode = result.statusCode;
         page.redirects = result.redirects; page.contentType = result.headers["content-type"] ?? null;
         page.responseTimeMs = result.responseTimeMs;
@@ -206,7 +215,7 @@ export async function crawlSite(startUrl: string, options: CrawlOptions = {}): P
       pages.push(page);
       if (page.statusCode !== null && !page.error) finalFetched.add(normalizeUrl(page.finalUrl) ?? page.finalUrl);
       for (const link of page.parsed?.links ?? []) {
-        if (!link.internal || !isInternalUrl(link.url, startUrl)) continue;
+        if (!link.internal || !isInCrawlScope(link.url, scope)) continue;
         relationships.push({ source: page.url, target: link.url, nofollow: link.nofollow, text: link.text });
         if (!isCrawlableUrl(link.url)) continue;
         const existing = candidates.get(link.url);
@@ -258,13 +267,13 @@ export async function crawlSite(startUrl: string, options: CrawlOptions = {}): P
 
   progress(86, "Checking available image sizes…");
   const imageChecks = new Map<string, { size: number | null; error?: string }>();
-  const imageUrls = [...new Set(pages.flatMap(page => (page.parsed?.images ?? []).map(image => image.src)))].filter(url => isInternalUrl(url, startUrl)).slice(0, limits.maxImageChecks);
+  const imageUrls = [...new Set(pages.flatMap(page => (page.parsed?.images ?? []).map(image => image.src)))].filter(url => isInCrawlScope(url, scope)).slice(0, limits.maxImageChecks);
   for (let offset = 0; offset < imageUrls.length; offset += limits.concurrency) {
     if (Date.now() > deadline) break;
     await Promise.all(imageUrls.slice(offset, offset + limits.concurrency).map(async url => {
       try {
-        await beforeRequest(url);
-        const result = await fetcher(url, { ...pageOptions, method: "HEAD", beforeRequest: async target => { if (target !== url) await beforeRequest(target); } });
+        await beforePageRequest(url);
+        const result = await fetcher(url, { ...pageOptions, method: "HEAD", beforeRequest: async target => { if (target !== url) await beforePageRequest(target); } });
         const length = result.headers["content-length"];
         const size = length && /^\d+$/.test(length) && Number.isSafeInteger(Number(length)) ? Number(length) : null;
         imageChecks.set(url, result.statusCode >= 200 && result.statusCode < 300 ? { size } : { size: null, error: `HTTP ${result.statusCode} in HEAD` });
@@ -276,7 +285,7 @@ export async function crawlSite(startUrl: string, options: CrawlOptions = {}): P
     image.contentLength = checked?.size ?? null;
     if (checked?.error) image.checkError = checked.error;
   }
-  warnings.push(`Image sizes: up to ${limits.maxImageChecks} unique internal URLs using HEAD. Size is not estimated without Content-Length.`);
+  warnings.push(`Image sizes: up to ${limits.maxImageChecks} unique in-scope URLs using HEAD. Size is not estimated without Content-Length.`);
   for (const pending of policies.values()) {
     const { report } = await pending;
     warnings.push(...report.warnings.map(warning => `${report.url}: ${warning}`));

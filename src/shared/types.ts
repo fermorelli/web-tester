@@ -5,6 +5,8 @@ export type Category = (typeof CATEGORIES)[number];
 
 export interface Issue {
   id: string;
+  kind?: "issue" | "observation";
+  references?: { label: string; url: string }[];
   name: string;
   category: Category;
   severity: Severity;
@@ -24,6 +26,7 @@ export interface ParsedPage {
   canonicalRaw: string | null;
   canonicalCount: number;
   canonicalInvalid: boolean;
+  canonicalDeclarations?: { source: "html" | "header"; raw: string | null; url: string | null }[];
   robots: string[];
   robotDirectives?: { source: "meta" | "header"; agent: string; directives: string[] }[];
   noindex: boolean;
@@ -83,7 +86,10 @@ export interface CrawlLimits {
   maxResponseBytes: number;
   maxRedirects: number;
   maxImageChecks: number;
+  scope?: CrawlScope;
+  analysisVersion?: number;
 }
+export interface CrawlScope { kind: "host" | "path"; rootUrl: string }
 export type AuditStatus = "queued" | "running" | "completed" | "failed" | "interrupted";
 export interface LighthouseResult {
   status: "completed" | "unavailable";
@@ -108,6 +114,8 @@ export interface AuditSummary {
   crawledPages: number;
   errorPages: number;
   issueCount: number;
+  observationCount?: number;
+  analysisVersion?: number;
   maxPages: number;
   progress: number;
   message: string;

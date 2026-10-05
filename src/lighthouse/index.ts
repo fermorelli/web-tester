@@ -3,16 +3,14 @@ import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { normalizeUrl } from "@/crawler/url";
+import { auditRootUrl } from "@/crawler/url";
 import { resolvePublicAddress } from "@/crawler/security";
 import type { LighthouseResult } from "@/shared/types";
 import { startLighthouseProxy } from "./proxy";
 import { explainLighthouseFailure, lighthouseMemory, type LighthouseMemory } from "./diagnostics";
 
 export function homepageUrl(input: string): string {
-  const normalized = normalizeUrl(input);
-  if (!normalized) throw new Error("The homepage URL is invalid.");
-  return new URL("/", normalized).href;
+  return auditRootUrl(input);
 }
 
 export function lighthouseTimeout(): number {

@@ -31,7 +31,7 @@ process.on("message", async input => {
   try {
     const url = new URL(input.url);
     const proxy = new URL(input.proxyUrl);
-    if (!["http:", "https:"].includes(url.protocol) || url.pathname !== "/" || url.search || url.hash || url.username || url.password
+    if (!["http:", "https:"].includes(url.protocol) || url.search || url.hash || url.username || url.password
       || proxy.hostname !== "127.0.0.1" || proxy.protocol !== "http:") throw new Error("Invalid homepage worker configuration.");
     const chromeFlags = [
       "--headless=new", "--disable-gpu", "--disable-dev-shm-usage", "--disable-quic",

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isCrawlableUrl, isInternalUrl, normalizeUrl, siteHostname } from "@/crawler/url";
+import { auditRootUrl, inferCrawlScope, isCrawlableUrl, isInCrawlScope, isInternalUrl, normalizeUrl, siteHostname } from "@/crawler/url";
 
 describe("URL normalization", () => {
   it("canonicalizes host, default port, fragment and tracking parameters while retaining useful query state", () => {
@@ -22,6 +22,70 @@ describe("URL normalization", () => {
     expect(normalizeUrl("https://example.com/Products?page=2&tag=b&tag=a"))
       .toBe("https://example.com/Products?page=2&tag=b&tag=a");
     expect(normalizeUrl("https://example.com/Products?page=1")).not.toBe(normalizeUrl("https://example.com/products?page=2"));
+  });
+});
+
+describe("submitted website scope", () => {
+  const scope = inferCrawlScope("https://fermorelli.github.io/new-portfolio/?lang=es#work");
+
+  it("preserves the submitted path while excluding query state from the audit root", () => {
+    expect(auditRootUrl("HTTPS://FerMorelli.GitHub.io:443/new-portfolio/?lang=es&utm_source=test#work"))
+      .toBe("https://fermorelli.github.io/new-portfolio/");
+    expect(scope).toEqual({ kind: "path", rootUrl: "https://fermorelli.github.io/new-portfolio/" });
+    expect(inferCrawlScope("fermorelli.github.io?lang=es")).toEqual({ kind: "host", rootUrl: "https://fermorelli.github.io/" });
+    expect(inferCrawlScope("https://example.com/project/index.html").rootUrl).toBe("https://example.com/project/index.html");
+    expect(() => auditRootUrl("https://user:secret@example.com/project/")).toThrow();
+  });
+
+  it.each([
+    "https://fermorelli.github.io/new-portfolio",
+    "https://fermorelli.github.io/new-portfolio/",
+    "https://fermorelli.github.io/new-portfolio/about?lang=es",
+    "https://fermorelli.github.io/new-portfolio/about?return=%2Fother",
+    "http://www.fermorelli.github.io/new-portfolio/contact",
+    "https://fermorelli.github.io/new-portfolio/work/../about",
+    "about",
+  ])("allows the exact path and slash-delimited descendants: %s", url => {
+    expect(isInCrawlScope(url, scope)).toBe(true);
+  });
+
+  it.each([
+    "https://fermorelli.github.io/",
+    "https://fermorelli.github.io/E-commerce/",
+    "https://fermorelli.github.io/traveling-planner/",
+    "https://fermorelli.github.io/weather-dashboard/",
+    "https://fermorelli.github.io/new-portfolio-old/",
+    "https://fermorelli.github.io/new-portfolio%2Fother/",
+    "https://fermorelli.github.io/New-Portfolio/",
+    "https://fermorelli.github.io/new-portfolio/../E-commerce/",
+    "https://fermorelli.github.io/new-portfolio/%2e%2e/E-commerce/",
+    "https://fermorelli.github.io/new-portfolio/%2e%2e%2fE-commerce/",
+    "https://fermorelli.github.io/new-portfolio/%5C..%5CE-commerce/",
+    "https://fermorelli.github.io/new-portfolio/%252e%252e%252fE-commerce/",
+    "https://api.fermorelli.github.io/new-portfolio/",
+    "https://fermorelli.github.io:3000/new-portfolio/",
+    "https://user:secret@fermorelli.github.io/new-portfolio/",
+    "../E-commerce/",
+    "mailto:x@example.com",
+  ])("excludes sibling projects, prefix collisions, escaped paths and other hosts: %s", url => {
+    expect(isInCrawlScope(url, scope)).toBe(false);
+  });
+
+  it("keeps host classification separate and retains whole-host audits at the root", () => {
+    const sibling = "https://fermorelli.github.io/E-commerce/";
+    expect(isInternalUrl(sibling, scope.rootUrl)).toBe(true);
+    expect(isInCrawlScope(sibling, scope)).toBe(false);
+    expect(isInCrawlScope(sibling, inferCrawlScope("https://fermorelli.github.io/"))).toBe(true);
+    expect(isInCrawlScope("https://other.example/new-portfolio/", inferCrawlScope("https://fermorelli.github.io/"))).toBe(false);
+    expect(isInCrawlScope("https://fermorelli.github.io/new-portfolio/%2e%2e%2fE-commerce/", inferCrawlScope("https://fermorelli.github.io/"))).toBe(true);
+  });
+
+  it("does not widen a submitted path by collapsing repeated slash segments", () => {
+    const repeated = inferCrawlScope("https://example.com/project//");
+    expect(repeated.rootUrl).toBe("https://example.com/project//");
+    expect(isInCrawlScope("https://example.com/project//child", repeated)).toBe(true);
+    expect(isInCrawlScope("https://example.com/project/child", repeated)).toBe(false);
+    expect(isInCrawlScope("https://example.com/project", repeated)).toBe(false);
   });
 });
 

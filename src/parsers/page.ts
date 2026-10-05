@@ -5,14 +5,64 @@ import type { ParsedPage } from "../shared/types";
 
 const clean = (value: string) => value.replace(/\s+/g, " ").trim();
 
+/** Link headers may contain commas inside a target URI or a quoted parameter. */
+function linkValues(header: string, separator = ","): string[] {
+  const values: string[] = [];
+  let start = 0, inTarget = false, quoted = false, escaped = false;
+  for (let index = 0; index < header.length; index++) {
+    const char = header[index];
+    if (escaped) { escaped = false; continue; }
+    if (quoted && char === "\\") { escaped = true; continue; }
+    if (!inTarget && char === '"') quoted = !quoted;
+    if (!quoted && char === "<") inTarget = true;
+    if (!quoted && char === ">") inTarget = false;
+    if (char === separator && !inTarget && !quoted) { values.push(header.slice(start, index)); start = index + 1; }
+  }
+  values.push(header.slice(start));
+  return values;
+}
+
+function linkParameters(value: string): Map<string, string> | null {
+  const parameters = new Map<string, string>();
+  for (const part of linkValues(value, ";")) {
+    if (!part.trim()) continue;
+    const match = part.trim().match(/^([^=\s]+)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^\s;"]+))$/);
+    if (!match) return null;
+    const key = match[1].toLowerCase();
+    if (parameters.has(key)) return null; // Ambiguous parameters are not canonical evidence.
+    parameters.set(key, (match[2] ?? match[3]).replace(/\\(.)/g, "$1"));
+  }
+  return parameters;
+}
+
 /** Parse the server response only: this function never executes scripts or requests resources. */
 export function parsePage(html: string, url: string, responseHeaders: Record<string, string> = {}): ParsedPage {
   const $ = cheerio.load(html);
   const pageBase = normalizeUrl($("base[href]").first().attr("href") ?? "", url) ?? url;
   const meta = (name: string) => $("meta").filter((_, el) => ($(el).attr("name") ?? "").toLowerCase() === name).first().attr("content");
-  const canonicalElements = $("link").filter((_, el) => ($(el).attr("rel") ?? "").toLowerCase().split(/\s+/).includes("canonical"));
-  const canonicalRaw = canonicalElements.first().attr("href")?.trim() ?? null;
-  const canonical = canonicalRaw ? normalizeUrl(canonicalRaw, pageBase) : null;
+  // Google accepts HTML canonicals in head and canonicals in the HTTP Link header.
+  const canonicalElements = $("head link").filter((_, el) => ($(el).attr("rel") ?? "").toLowerCase().split(/\s+/).includes("canonical"));
+  const canonicalDeclarations: NonNullable<ParsedPage["canonicalDeclarations"]> = canonicalElements.toArray().map(el => {
+    const raw = $(el).attr("href")?.trim() ?? null;
+    return { source: "html", raw, url: raw ? normalizeUrl(raw, pageBase) : null };
+  });
+  const linkHeader = Object.entries(responseHeaders).find(([key]) => key.toLowerCase() === "link")?.[1];
+  for (const value of linkValues(linkHeader ?? "")) {
+    const match = value.trim().match(/^<([^<>]*)>(.*)$/);
+    if (!match) continue;
+    const parameters = linkParameters(match[2]);
+    if (!parameters?.get("rel")?.toLowerCase().split(/\s+/).includes("canonical")) continue;
+    const anchor = parameters.get("anchor");
+    if (anchor !== undefined) {
+      try { if (new URL(anchor, url).href !== new URL(url).href) continue; }
+      catch { continue; }
+    }
+    const raw = match[1].trim();
+    canonicalDeclarations.push({ source: "header", raw, url: raw ? normalizeUrl(raw, url) : null });
+  }
+  const canonicalRaw = canonicalDeclarations[0]?.raw ?? null;
+  const canonical = canonicalDeclarations.find(declaration => declaration.url)?.url ?? null;
+  const canonicalTargets = new Set(canonicalDeclarations.flatMap(declaration => declaration.url ? [declaration.url] : []));
   const robots = new Set<string>();
   const robotDirectives: NonNullable<ParsedPage["robotDirectives"]> = [];
   const parseDirectives = (value: string): string[] => {
@@ -78,36 +128,26 @@ export function parsePage(html: string, url: string, responseHeaders: Record<str
   });
   const schemaTypes = new Set<string>();
   const jsonLdErrors: string[] = [];
-  const schemaWarnings: string[] = [];
-  const ids = new Map<string, string>();
   const jsonLdScripts = $("script").filter((_, el) => ($(el).attr("type") ?? "").toLowerCase().split(";")[0].trim() === "application/ld+json");
-  const inspectSchema = (value: unknown, inheritedContext: boolean, path: string): void => {
-    if (Array.isArray(value)) { value.forEach((entry, index) => inspectSchema(entry, inheritedContext, `${path}[${index}]`)); return; }
-    if (!value || typeof value !== "object") { schemaWarnings.push(`${path}: expected a JSON-LD object.`); return; }
-    const node = value as Record<string, unknown>;
-    const hasContext = inheritedContext || !!node["@context"];
-    if (!hasContext) schemaWarnings.push(`${path}: missing @context; check whether this is a complete JSON-LD document.`);
-    const types = Array.isArray(node["@type"]) ? node["@type"] : [node["@type"]];
-    for (const type of types) if (typeof type === "string" && type.trim()) schemaTypes.add(type.trim());
-    if (!node["@type"] && !node["@graph"]) schemaWarnings.push(`${path}: missing @type or @graph.`);
-    if (node["@type"] && types.some(type => typeof type !== "string" || !type.trim())) schemaWarnings.push(`${path}: @type must contain type names.`);
-    if (typeof node["@id"] === "string") {
-      const signature = JSON.stringify(node);
-      const previous = ids.get(node["@id"]);
-      if (previous && previous !== signature) schemaWarnings.push(`${path}: repeated @id with different properties: ${node["@id"]}`);
-      ids.set(node["@id"], signature);
-    }
-    if (node.url !== undefined && (typeof node.url !== "string" || !normalizeUrl(node.url, pageBase))) schemaWarnings.push(`${path}: the url property does not contain a valid HTTP URL.`);
-    if (node["@graph"] !== undefined) inspectSchema(node["@graph"], hasContext, `${path}.@graph`);
-    // Nested objects may describe entities too; scalar properties do not need schema annotations.
-    for (const [key, child] of Object.entries(node)) if (!key.startsWith("@") && child && typeof child === "object") {
-      const children = Array.isArray(child) ? child : [child];
-      for (const [index, entry] of children.entries()) if (entry && typeof entry === "object" && ("@type" in entry || "@graph" in entry)) inspectSchema(entry, hasContext, `${path}.${key}[${index}]`);
+  // Inventory declared types only. This is not a JSON-LD or rich-result validator.
+  const inspectSchema = (value: unknown): void => {
+    const pending: unknown[] = [value];
+    while (pending.length) {
+      const entry = pending.pop();
+      if (Array.isArray(entry)) { for (let index = entry.length - 1; index >= 0; index--) pending.push(entry[index]); continue; }
+      if (!entry || typeof entry !== "object") continue;
+      const node = entry as Record<string, unknown>;
+      const types = Array.isArray(node["@type"]) ? node["@type"] : [node["@type"]];
+      for (const type of types) if (typeof type === "string" && type.trim()) schemaTypes.add(type.trim());
+      // Reverse insertion preserves document order when popping the stack.
+      for (const [key, child] of Object.entries(node).reverse()) if (key !== "@context" && key !== "@type") pending.push(child);
     }
   };
   jsonLdScripts.each((index, el) => {
-    try { inspectSchema(JSON.parse($(el).html() ?? ""), false, `Block ${index + 1}`); }
-    catch (error) { jsonLdErrors.push(`Block ${index + 1}: ${error instanceof Error ? error.message : "Invalid JSON"}`); }
+    let value: unknown;
+    try { value = JSON.parse($(el).html() ?? ""); }
+    catch (error) { jsonLdErrors.push(`Block ${index + 1}: ${error instanceof Error ? error.message : "Invalid JSON"}`); return; }
+    inspectSchema(value);
   });
   const openGraph: Record<string, string> = {};
   const twitter: Record<string, string> = {};
@@ -134,13 +174,13 @@ export function parsePage(html: string, url: string, responseHeaders: Record<str
   return {
     title: clean($("title").first().text()) || null,
     description: clean(meta("description") ?? "") || null,
-    canonical, canonicalRaw, canonicalCount: canonicalElements.length,
-    canonicalInvalid: canonicalElements.length > 0 && !canonical,
+    canonical, canonicalRaw, canonicalCount: canonicalDeclarations.length, canonicalDeclarations,
+    canonicalInvalid: canonicalDeclarations.some(declaration => !declaration.url) || canonicalTargets.size > 1,
     robots: [...robots], robotDirectives, noindex: robots.has("noindex"), nofollow: robots.has("nofollow"),
     headings, h1: headings.filter(heading => heading.level === 1).map(heading => heading.text),
     wordCount: contentText.match(/[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*/gu)?.length ?? 0,
     contentHash: createHash("sha256").update(contentText.toLowerCase()).digest("hex"), contentSample: contentText.slice(0, 600),
-    links, images, schemaTypes: [...schemaTypes], jsonLdCount: jsonLdScripts.length, jsonLdErrors, schemaWarnings: [...new Set(schemaWarnings)],
+    links, images, schemaTypes: [...schemaTypes], jsonLdCount: jsonLdScripts.length, jsonLdErrors, schemaWarnings: [],
     social: { openGraph, twitter }, tracking, language: $("html").attr("lang")?.trim() || null,
   };
 }

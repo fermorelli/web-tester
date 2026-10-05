@@ -4,7 +4,8 @@ export interface IssueReporter { add(id: IssueId, url: string, detail: string): 
 export type Analyzer = (context: AnalysisContext, report: IssueReporter) => void;
 export type HtmlPage = PageAnalysis & { parsed: ParsedPage };
 export function htmlPages(context: AnalysisContext): HtmlPage[] {
-  return context.pages.filter((page): page is HtmlPage => !!page.parsed && !page.blockedByRobots);
+  return context.pages.filter((page): page is HtmlPage => !!page.parsed && !page.blockedByRobots && !page.error
+    && page.statusCode !== null && page.statusCode >= 200 && page.statusCode < 300);
 }
 export function pageLookup(context: AnalysisContext): Map<string, PageAnalysis> {
   const lookup = new Map<string, PageAnalysis>();

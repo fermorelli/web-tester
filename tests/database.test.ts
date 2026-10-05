@@ -96,6 +96,34 @@ describe("AuditRepository", () => {
     expect(repository.getAudit("nonexistent")).toBeNull();
   });
 
+  it("keeps contextual observations out of issue counts and persists the selected scope", () => {
+    const audit = repository.createAudit("https://example.com/portfolio/", "example.com", 50);
+    const crawl = result([page("https://example.com/portfolio/")]);
+    crawl.limits.scope = { kind: "path", rootUrl: audit.startUrl };
+    crawl.limits.analysisVersion = 2;
+    const observation: Issue = { ...issue, id: "canonical_missing", ...issueCatalog.canonical_missing, kind: "observation" };
+    repository.finishAudit(audit.id, crawl, [issue, observation]);
+    repository.close();
+    repository = new AuditRepository(databasePath);
+    expect(repository.listAudits()[0]).toMatchObject({ issueCount: 1, observationCount: 1, analysisVersion: 2 });
+    expect(repository.getAudit(audit.id)).toMatchObject({
+      issueCount: 1, observationCount: 1, limits: { scope: { kind: "path", rootUrl: audit.startUrl }, analysisVersion: 2 },
+      issues: expect.arrayContaining([expect.objectContaining({ id: "canonical_missing", kind: "observation" })]),
+    });
+  });
+
+  it("presents legacy observation counts consistently without rewriting their saved counts", () => {
+    const audit = repository.createAudit("https://example.com/", "example.com", 50);
+    const observation: Issue = { ...issue, id: "canonical_missing", ...issueCatalog.canonical_missing };
+    repository.finishAudit(audit.id, result(), [observation]);
+    const inspect = new DatabaseSync(databasePath);
+    inspect.prepare("UPDATE audits SET issue_count = 1 WHERE id = ?").run(audit.id);
+    expect(repository.listAudits()[0]).toMatchObject({ issueCount: 0, observationCount: 1, analysisVersion: 0 });
+    expect(repository.getAudit(audit.id)).toMatchObject({ issueCount: 0, observationCount: 1 });
+    expect(inspect.prepare("SELECT issue_count FROM audits WHERE id = ?").get(audit.id)).toEqual({ issue_count: 1 });
+    inspect.close();
+  });
+
   it("keeps separate histories for each site with bounded newest-first listing", () => {
     const first = repository.createAudit("https://example.com/", "example.com", 10);
     const second = repository.createAudit("https://example.com/about", "example.com", 20);
